@@ -59,6 +59,8 @@ def _reset_config(config_file):
     config["DEFAULT"]["folder_format"] = DEFAULT_FOLDER
     config["DEFAULT"]["track_format"] = DEFAULT_TRACK
     config["DEFAULT"]["smart_discography"] = "false"
+    config["DEFAULT"]["api_delay"] = "1.0"
+    config["DEFAULT"]["download_delay"] = "0.3"
     with open(config_file, "w") as configfile:
         config.write(configfile)
     logging.info(
@@ -132,6 +134,8 @@ def main():
         smart_discography = config.getboolean("DEFAULT", "smart_discography")
         folder_format = config["DEFAULT"]["folder_format"]
         track_format = config["DEFAULT"]["track_format"]
+        api_delay = config.getfloat("DEFAULT", "api_delay")
+        download_delay = config.getfloat("DEFAULT", "download_delay")
 
         secrets = [
             secret for secret in config["DEFAULT"]["secrets"].split(",") if secret
@@ -176,6 +180,8 @@ def main():
         folder_format=arguments.folder_format or folder_format,
         track_format=arguments.track_format or track_format,
         smart_discography=arguments.smart_discography or smart_discography,
+        api_delay=getattr(arguments, 'api_delay', None) or api_delay,
+        download_delay=getattr(arguments, 'download_delay', None) or download_delay,
     )
     qobuz.initialize_client(email, password, app_id, secrets)
 

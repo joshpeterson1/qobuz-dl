@@ -1,6 +1,7 @@
 import logging
 import os
 import sys
+import time
 
 import requests
 from bs4 import BeautifulSoup as bso
@@ -52,6 +53,8 @@ class QobuzDL:
         "{sampling_rate}kHz]",
         track_format="{tracknumber}. {tracktitle}",
         smart_discography=False,
+        api_delay=1.0,
+        download_delay=0.3,
     ):
         self.directory = create_and_return_dir(directory)
         self.quality = quality
@@ -68,9 +71,11 @@ class QobuzDL:
         self.folder_format = folder_format
         self.track_format = track_format
         self.smart_discography = smart_discography
+        self.api_delay = api_delay
+        self.download_delay = download_delay
 
     def initialize_client(self, email, pwd, app_id, secrets):
-        self.client = qopy.Client(email, pwd, app_id, secrets)
+        self.client = qopy.Client(email, pwd, app_id, secrets, self.api_delay)
         logger.info(f"{YELLOW}Set max quality: {QUALITIES[int(self.quality)]}\n")
 
     def get_tokens(self):
@@ -162,6 +167,8 @@ class QobuzDL:
                     True if type_dict["iterable_key"] == "albums" else False,
                     new_path,
                 )
+                if self.download_delay > 0:
+                    time.sleep(self.download_delay)
             if url_type == "playlist" and not self.no_m3u_for_playlists:
                 make_m3u(new_path)
         else:
@@ -178,6 +185,8 @@ class QobuzDL:
                 self.download_from_txt_file(url)
             else:
                 self.handle_url(url)
+            if self.download_delay > 0 and len(urls) > 1:
+                time.sleep(self.download_delay)
 
     def download_from_txt_file(self, txt_file):
         with open(txt_file, "r") as txt:

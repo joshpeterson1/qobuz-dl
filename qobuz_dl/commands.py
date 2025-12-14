@@ -127,6 +127,20 @@ def add_common_arg(custom_parser, default_folder, default_quality):
         artist, and deluxe/live/collection albums. Gives preference to remastered
         albums, high bit depth/dynamic range, and low sampling rates (to save space).""",
     )
+    custom_parser.add_argument(
+        "--api-delay",
+        metavar="SECONDS",
+        type=float,
+        default=1.0,
+        help="delay between API calls in seconds (default: 1.0)",
+    )
+    custom_parser.add_argument(
+        "--download-delay",
+        metavar="SECONDS",
+        type=float,
+        default=0.3,
+        help="delay between downloads in seconds (default: 0.3)",
+    )
 
 
 def qobuz_dl_args(

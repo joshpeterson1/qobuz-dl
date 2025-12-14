@@ -5,6 +5,7 @@
 import hashlib
 import logging
 import time
+import random
 
 import requests
 
@@ -23,10 +24,11 @@ logger = logging.getLogger(__name__)
 
 
 class Client:
-    def __init__(self, email, pwd, app_id, secrets):
+    def __init__(self, email, pwd, app_id, secrets, api_delay=1.0):
         logger.info(f"{YELLOW}Logging...")
         self.secrets = secrets
         self.id = str(app_id)
+        self.api_delay = api_delay
         self.session = requests.Session()
         self.session.headers.update(
             {
@@ -42,25 +44,74 @@ class Client:
         self.cfg_setup()
 
     def api_call(self, epoint, **kwargs):
+        max_retries = 3
+        base_delay = self.api_delay
+        
+        for attempt in range(max_retries + 1):
+            try:
+                params = self._build_params(epoint, **kwargs)
+                r = self.session.get(self.base + epoint, params=params)
+                
+                # Handle rate limiting
+                if r.status_code == 429:
+                    if attempt < max_retries:
+                        delay = base_delay * (2 ** attempt) + random.uniform(0, 1)
+                        logger.warning(f"{YELLOW}Rate limited. Retrying in {delay:.1f}s...")
+                        time.sleep(delay)
+                        continue
+                    else:
+                        raise requests.exceptions.HTTPError("Max retries exceeded due to rate limiting")
+                
+                # Handle authentication and validation errors
+                if epoint == "user/login":
+                    if r.status_code == 401:
+                        raise AuthenticationError("Invalid credentials.\n" + RESET)
+                    elif r.status_code == 400:
+                        raise InvalidAppIdError("Invalid app id.\n" + RESET)
+                    else:
+                        logger.info(f"{GREEN}Logged: OK")
+                elif (
+                    epoint in ["track/getFileUrl", "favorite/getUserFavorites"]
+                    and r.status_code == 400
+                ):
+                    raise InvalidAppSecretError(f"Invalid app secret: {r.json()}.\n" + RESET)
+
+                r.raise_for_status()
+                
+                # Success - add normal delay before next call
+                if self.api_delay > 0 and epoint != "user/login":
+                    time.sleep(self.api_delay)
+                    
+                return r.json()
+                
+            except requests.exceptions.RequestException as e:
+                if attempt < max_retries and r.status_code != 401:  # Don't retry auth errors
+                    delay = base_delay * (2 ** attempt) + random.uniform(0, 0.5)
+                    logger.warning(f"{YELLOW}Request failed. Retrying in {delay:.1f}s...")
+                    time.sleep(delay)
+                else:
+                    raise
+
+    def _build_params(self, epoint, **kwargs):
         if epoint == "user/login":
-            params = {
+            return {
                 "email": kwargs["email"],
                 "password": kwargs["pwd"],
                 "app_id": self.id,
             }
         elif epoint == "track/get":
-            params = {"track_id": kwargs["id"]}
+            return {"track_id": kwargs["id"]}
         elif epoint == "album/get":
-            params = {"album_id": kwargs["id"]}
+            return {"album_id": kwargs["id"]}
         elif epoint == "playlist/get":
-            params = {
+            return {
                 "extra": "tracks",
                 "playlist_id": kwargs["id"],
                 "limit": 500,
                 "offset": kwargs["offset"],
             }
         elif epoint == "artist/get":
-            params = {
+            return {
                 "app_id": self.id,
                 "artist_id": kwargs["id"],
                 "limit": 500,
@@ -68,7 +119,7 @@ class Client:
                 "extra": "albums",
             }
         elif epoint == "label/get":
-            params = {
+            return {
                 "label_id": kwargs["id"],
                 "limit": 500,
                 "offset": kwargs["offset"],
@@ -79,7 +130,7 @@ class Client:
             # r_sig = "userLibrarygetAlbumsList" + str(unix) + kwargs["sec"]
             r_sig = "favoritegetUserFavorites" + str(unix) + kwargs["sec"]
             r_sig_hashed = hashlib.md5(r_sig.encode("utf-8")).hexdigest()
-            params = {
+            return {
                 "app_id": self.id,
                 "user_auth_token": self.uat,
                 "type": "albums",
@@ -96,7 +147,7 @@ class Client:
                 fmt_id, track_id, unix, kwargs.get("sec", self.sec)
             )
             r_sig_hashed = hashlib.md5(r_sig.encode("utf-8")).hexdigest()
-            params = {
+            return {
                 "request_ts": unix,
                 "request_sig": r_sig_hashed,
                 "track_id": track_id,
@@ -104,23 +155,7 @@ class Client:
                 "intent": "stream",
             }
         else:
-            params = kwargs
-        r = self.session.get(self.base + epoint, params=params)
-        if epoint == "user/login":
-            if r.status_code == 401:
-                raise AuthenticationError("Invalid credentials.\n" + RESET)
-            elif r.status_code == 400:
-                raise InvalidAppIdError("Invalid app id.\n" + RESET)
-            else:
-                logger.info(f"{GREEN}Logged: OK")
-        elif (
-            epoint in ["track/getFileUrl", "favorite/getUserFavorites"]
-            and r.status_code == 400
-        ):
-            raise InvalidAppSecretError(f"Invalid app secret: {r.json()}.\n" + RESET)
-
-        r.raise_for_status()
-        return r.json()
+            return kwargs
 
     def auth(self, email, pwd):
         usr_info = self.api_call("user/login", email=email, pwd=pwd)
