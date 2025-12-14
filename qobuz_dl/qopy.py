@@ -3,9 +3,12 @@
 # original author.
 
 import hashlib
+import json
 import logging
+import os
 import time
 import random
+from datetime import datetime
 
 import requests
 
@@ -29,6 +32,8 @@ class Client:
         self.secrets = secrets
         self.id = str(app_id)
         self.api_delay = api_delay
+        self.email = email
+        self.pwd = pwd
         self.session = requests.Session()
         self.session.headers.update(
             {
@@ -40,7 +45,20 @@ class Client:
         )
         self.base = "https://www.qobuz.com/api.json/0.2/"
         self.sec = None
-        self.auth(email, pwd)
+        self.uat = None
+        self.label = None
+        
+        # Set up token cache path
+        if os.name == "nt":
+            config_dir = os.environ.get("APPDATA")
+        else:
+            config_dir = os.path.join(os.environ["HOME"], ".config")
+        self.token_cache_path = os.path.join(config_dir, "qobuz-dl", "token_cache.json")
+        
+        # Try to use cached token first, fall back to fresh auth
+        if not self._try_cached_token():
+            self.auth(email, pwd)
+        
         self.cfg_setup()
 
     def api_call(self, epoint, **kwargs):
@@ -70,6 +88,15 @@ class Client:
                         raise InvalidAppIdError("Invalid app id.\n" + RESET)
                     else:
                         logger.info(f"{GREEN}Logged: OK")
+                elif r.status_code == 401 and epoint != "user/login":
+                    # Token expired/invalid - try to re-auth once
+                    logger.warning(f"{YELLOW}Token appears to be invalid/expired. Re-authenticating...")
+                    self._clear_token_cache()
+                    self.auth(self.email, self.pwd)
+                    # Retry the original request with new token
+                    params = self._build_params(epoint, **kwargs)
+                    r = self.session.get(self.base + epoint, params=params)
+                    r.raise_for_status()
                 elif (
                     epoint in ["track/getFileUrl", "favorite/getUserFavorites"]
                     and r.status_code == 400
@@ -158,6 +185,7 @@ class Client:
             return kwargs
 
     def auth(self, email, pwd):
+        logger.info(f"{YELLOW}Authenticating with fresh login...")
         usr_info = self.api_call("user/login", email=email, pwd=pwd)
         if not usr_info["user"]["credential"]["parameters"]:
             raise IneligibleError("Free accounts are not eligible to download tracks.")
@@ -165,6 +193,9 @@ class Client:
         self.session.headers.update({"X-User-Auth-Token": self.uat})
         self.label = usr_info["user"]["credential"]["parameters"]["short_label"]
         logger.info(f"{GREEN}Membership: {self.label}")
+        
+        # Cache the token
+        self._cache_token()
 
     def multi_meta(self, epoint, key, id, type):
         total = 1
@@ -249,3 +280,81 @@ class Client:
 
         if self.sec is None:
             raise InvalidAppSecretError("Can't find any valid app secret.\n" + RESET)
+
+    def _try_cached_token(self):
+        """Try to load and use a cached authentication token."""
+        try:
+            if not os.path.exists(self.token_cache_path):
+                logger.info(f"{YELLOW}No cached token found")
+                return False
+                
+            with open(self.token_cache_path, 'r') as f:
+                cache_data = json.load(f)
+            
+            # Check if cache is for the same email
+            if cache_data.get('user_email') != self.email:
+                logger.info(f"{YELLOW}Cached token is for different user, ignoring")
+                return False
+                
+            cached_token = cache_data.get('user_auth_token')
+            if not cached_token:
+                logger.info(f"{YELLOW}Invalid cached token data")
+                return False
+                
+            # Try to use the cached token
+            self.uat = cached_token
+            self.session.headers.update({"X-User-Auth-Token": self.uat})
+            
+            # Test the token with a simple API call
+            try:
+                # Use a lightweight call to test token validity
+                test_response = self.session.get(f"{self.base}user/login", params={
+                    "app_id": self.id
+                })
+                if test_response.status_code == 401:
+                    logger.info(f"{YELLOW}Cached token is expired/invalid")
+                    return False
+                    
+                logger.info(f"{GREEN}Using cached authentication token")
+                # We still need to get user info for the label
+                # But we can't call user/login again, so we'll set a default
+                self.label = cache_data.get('user_label', 'Unknown')
+                logger.info(f"{GREEN}Membership: {self.label}")
+                return True
+                
+            except Exception as e:
+                logger.info(f"{YELLOW}Error testing cached token: {e}")
+                return False
+                
+        except Exception as e:
+            logger.info(f"{YELLOW}Error loading cached token: {e}")
+            return False
+
+    def _cache_token(self):
+        """Save the current authentication token to cache."""
+        try:
+            os.makedirs(os.path.dirname(self.token_cache_path), exist_ok=True)
+            
+            cache_data = {
+                'user_auth_token': self.uat,
+                'user_email': self.email,
+                'user_label': self.label,
+                'cached_at': datetime.now().isoformat()
+            }
+            
+            with open(self.token_cache_path, 'w') as f:
+                json.dump(cache_data, f, indent=2)
+                
+            logger.info(f"{GREEN}Authentication token cached")
+            
+        except Exception as e:
+            logger.warning(f"{YELLOW}Failed to cache token: {e}")
+
+    def _clear_token_cache(self):
+        """Remove the cached token file."""
+        try:
+            if os.path.exists(self.token_cache_path):
+                os.remove(self.token_cache_path)
+                logger.info(f"{YELLOW}Cleared cached token")
+        except Exception as e:
+            logger.warning(f"{YELLOW}Failed to clear token cache: {e}")
