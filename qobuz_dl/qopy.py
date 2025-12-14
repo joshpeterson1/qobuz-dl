@@ -27,11 +27,12 @@ logger = logging.getLogger(__name__)
 
 
 class Client:
-    def __init__(self, email, pwd, app_id, secrets, api_delay=1.0):
+    def __init__(self, email, pwd, app_id, secrets, api_delay=1.0, rate_limiter=None):
         logger.info(f"{YELLOW}Logging...")
         self.secrets = secrets
         self.id = str(app_id)
         self.api_delay = api_delay
+        self.rate_limiter = rate_limiter
         self.email = email
         self.pwd = pwd
         self.session = requests.Session()
@@ -81,8 +82,13 @@ class Client:
         r.raise_for_status()
         
         # Add delay before next call
-        if self.api_delay > 0 and epoint != "user/login":
-            time.sleep(self.api_delay)
+        if epoint != "user/login":
+            if self.rate_limiter:
+                current_api_delay, _ = self.rate_limiter.get_delays()
+                if current_api_delay > 0:
+                    time.sleep(current_api_delay)
+            elif self.api_delay > 0:
+                time.sleep(self.api_delay)
             
         return r.json()
 

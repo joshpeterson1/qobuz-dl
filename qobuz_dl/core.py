@@ -9,6 +9,7 @@ from pathvalidate import sanitize_filename
 
 from qobuz_dl.bundle import Bundle
 from qobuz_dl import downloader, qopy
+from qobuz_dl.downloader import RateLimiter
 from qobuz_dl.color import CYAN, OFF, RED, YELLOW, DF, RESET
 from qobuz_dl.exceptions import NonStreamable
 from qobuz_dl.db import create_db, handle_download_id
@@ -73,9 +74,10 @@ class QobuzDL:
         self.smart_discography = smart_discography
         self.api_delay = api_delay
         self.download_delay = download_delay
+        self.rate_limiter = RateLimiter(api_delay, download_delay)
 
     def initialize_client(self, email, pwd, app_id, secrets):
-        self.client = qopy.Client(email, pwd, app_id, secrets, self.api_delay)
+        self.client = qopy.Client(email, pwd, app_id, secrets, self.api_delay, self.rate_limiter)
         logger.info(f"{YELLOW}Set max quality: {QUALITIES[int(self.quality)]}\n")
 
     def get_tokens(self):
@@ -106,6 +108,7 @@ class QobuzDL:
                 self.no_cover,
                 self.folder_format,
                 self.track_format,
+                self.rate_limiter,
             )
             dloader.download_id_by_type(not album)
             handle_download_id(self.downloads_db, item_id, add_id=True)
@@ -167,8 +170,10 @@ class QobuzDL:
                     True if type_dict["iterable_key"] == "albums" else False,
                     new_path,
                 )
-                if self.download_delay > 0:
-                    time.sleep(self.download_delay)
+                # Use current rate limiter delays
+                _, current_download_delay = self.rate_limiter.get_delays()
+                if current_download_delay > 0:
+                    time.sleep(current_download_delay)
             if url_type == "playlist" and not self.no_m3u_for_playlists:
                 make_m3u(new_path)
         else:
@@ -185,8 +190,10 @@ class QobuzDL:
                 self.download_from_txt_file(url)
             else:
                 self.handle_url(url)
-            if self.download_delay > 0 and len(urls) > 1:
-                time.sleep(self.download_delay)
+            # Use current rate limiter delays
+            _, current_download_delay = self.rate_limiter.get_delays()
+            if current_download_delay > 0 and len(urls) > 1:
+                time.sleep(current_download_delay)
 
     def download_from_txt_file(self, txt_file):
         with open(txt_file, "r") as txt:

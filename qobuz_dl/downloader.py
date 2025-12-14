@@ -3,6 +3,7 @@ import os
 import time
 import random
 from typing import Tuple
+from urllib3.exceptions import IncompleteRead
 
 import requests
 from pathvalidate import sanitize_filename, sanitize_filepath
@@ -31,6 +32,74 @@ DEFAULT_TRACK = "{tracknumber}. {tracktitle}"
 logger = logging.getLogger(__name__)
 
 
+class RateLimiter:
+    """Manages dynamic rate limiting with escalation on failures."""
+    
+    def __init__(self, initial_api_delay=1.0, initial_download_delay=0.3):
+        self.initial_api_delay = initial_api_delay
+        self.initial_download_delay = initial_download_delay
+        self.current_api_delay = initial_api_delay
+        self.current_download_delay = initial_download_delay
+        self.escalation_count = 0
+        self.successful_downloads = 0
+        
+    def escalate(self):
+        """Double the rate limits due to failures."""
+        self.escalation_count += 1
+        self.current_api_delay *= 2
+        self.current_download_delay *= 2
+        
+        # Cap at reasonable maximums
+        self.current_api_delay = min(self.current_api_delay, 30.0)
+        self.current_download_delay = min(self.current_download_delay, 10.0)
+        
+        logger.warning(
+            f"{YELLOW}Rate limits escalated (x{2**self.escalation_count}): "
+            f"API={self.current_api_delay:.1f}s, Download={self.current_download_delay:.1f}s"
+        )
+    
+    def record_success(self):
+        """Record a successful download."""
+        self.successful_downloads += 1
+        
+        # Reset rate limits after 10 successful downloads
+        if self.successful_downloads >= 10 and self.escalation_count > 0:
+            self.current_api_delay = self.initial_api_delay
+            self.current_download_delay = self.initial_download_delay
+            self.escalation_count = 0
+            self.successful_downloads = 0
+            logger.info(f"{GREEN}Rate limits reset to normal after successful downloads")
+    
+    def get_delays(self):
+        """Get current delay values."""
+        return self.current_api_delay, self.current_download_delay
+
+
+def _log_failed_track(track_desc, error_msg):
+    """Log failed track downloads to a file."""
+    try:
+        # Use same config directory as the main app
+        if os.name == "nt":
+            config_dir = os.environ.get("APPDATA")
+        else:
+            config_dir = os.path.join(os.environ["HOME"], ".config")
+        
+        log_dir = os.path.join(config_dir, "qobuz-dl")
+        os.makedirs(log_dir, exist_ok=True)
+        
+        failed_log_path = os.path.join(log_dir, "failed_downloads.log")
+        
+        with open(failed_log_path, "a", encoding="utf-8") as f:
+            timestamp = time.strftime("%Y-%m-%d %H:%M:%S")
+            f.write(f"[{timestamp}] FAILED: {track_desc}\n")
+            f.write(f"    Error: {error_msg}\n\n")
+            
+        logger.info(f"{YELLOW}Failed download logged to: {failed_log_path}")
+        
+    except Exception as e:
+        logger.warning(f"{YELLOW}Could not log failed download: {e}")
+
+
 class Download:
     def __init__(
         self,
@@ -45,6 +114,7 @@ class Download:
         no_cover: bool = False,
         folder_format=None,
         track_format=None,
+        rate_limiter=None,
     ):
         self.client = client
         self.item_id = item_id
@@ -57,6 +127,7 @@ class Download:
         self.no_cover = no_cover
         self.folder_format = folder_format or DEFAULT_FOLDER
         self.track_format = track_format or DEFAULT_TRACK
+        self.rate_limiter = rate_limiter
 
     def download_id_by_type(self, track=True):
         if not track:
@@ -224,20 +295,30 @@ class Download:
             logger.info(f"{OFF}{track_title} was already downloaded")
             return
 
-        tqdm_download(url, filename, filename)
-        tag_function = metadata.tag_mp3 if is_mp3 else metadata.tag_flac
         try:
-            tag_function(
-                filename,
-                root_dir,
-                final_file,
-                track_metadata,
-                album_or_track_metadata,
-                is_track,
-                self.embed_art,
-            )
+            tqdm_download(url, filename, track_title, rate_limiter=self.rate_limiter)
+            
+            # Record successful download
+            if self.rate_limiter:
+                self.rate_limiter.record_success()
+                
+            tag_function = metadata.tag_mp3 if is_mp3 else metadata.tag_flac
+            try:
+                tag_function(
+                    filename,
+                    root_dir,
+                    final_file,
+                    track_metadata,
+                    album_or_track_metadata,
+                    is_track,
+                    self.embed_art,
+                )
+            except Exception as e:
+                logger.error(f"{RED}Error tagging the file: {e}", exc_info=True)
+                
         except Exception as e:
-            logger.error(f"{RED}Error tagging the file: {e}", exc_info=True)
+            logger.error(f"{RED}Failed to download {track_title}: {e}")
+            # Don't re-raise - continue with next track
 
     @staticmethod
     def _get_filename_attr(artist, track_metadata, track_title):
@@ -307,26 +388,54 @@ class Download:
             return ("Unknown", quality_met, None, None)
 
 
-def tqdm_download(url, fname, desc):
-    r = requests.get(url, allow_redirects=True, stream=True)
-    total = int(r.headers.get("content-length", 0))
-    download_size = 0
-    with open(fname, "wb") as file, tqdm(
-        total=total,
-        unit="iB",
-        unit_scale=True,
-        unit_divisor=1024,
-        desc=desc,
-        bar_format=CYAN + "{n_fmt}/{total_fmt} /// {desc}",
-    ) as bar:
-        for data in r.iter_content(chunk_size=1024):
-            size = file.write(data)
-            bar.update(size)
-            download_size += size
+def tqdm_download(url, fname, desc, max_retries=3, rate_limiter=None):
+    """Download a file with retry logic for connection issues."""
+    for attempt in range(max_retries):
+        try:
+            r = requests.get(url, allow_redirects=True, stream=True, timeout=30)
+            r.raise_for_status()
+            total = int(r.headers.get("content-length", 0))
+            download_size = 0
+            
+            with open(fname, "wb") as file, tqdm(
+                total=total,
+                unit="iB",
+                unit_scale=True,
+                unit_divisor=1024,
+                desc=desc,
+                bar_format=CYAN + "{n_fmt}/{total_fmt} /// {desc}",
+            ) as bar:
+                for data in r.iter_content(chunk_size=1024):
+                    size = file.write(data)
+                    bar.update(size)
+                    download_size += size
 
-    if total != download_size:
-        # https://stackoverflow.com/questions/69919912/requests-iter-content-thinks-file-is-complete-but-its-not
-        raise ConnectionError("File download was interrupted for " + fname)
+            if total != download_size:
+                raise ConnectionError(f"File download was interrupted for {fname}")
+            
+            return  # Success!
+            
+        except (IncompleteRead, ConnectionError, requests.exceptions.RequestException) as e:
+            if attempt < max_retries - 1:  # Not the last attempt
+                logger.warning(f"{YELLOW}Download failed (attempt {attempt + 1}/{max_retries}): {e}")
+                logger.info(f"{YELLOW}Waiting 5 seconds before retry...")
+                time.sleep(5)
+                
+                # Remove partial file
+                try:
+                    if os.path.exists(fname):
+                        os.remove(fname)
+                except:
+                    pass
+            else:
+                # Final failure - log it and escalate rate limits
+                logger.error(f"{RED}Download failed after {max_retries} attempts: {e}")
+                _log_failed_track(desc, str(e))
+                
+                if rate_limiter:
+                    rate_limiter.escalate()
+                
+                raise e
 
 
 def _get_description(item: dict, track_title, multiple=None):
