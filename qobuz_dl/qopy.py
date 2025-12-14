@@ -62,62 +62,29 @@ class Client:
         self.cfg_setup()
 
     def api_call(self, epoint, **kwargs):
-        max_retries = 3
-        base_delay = self.api_delay
+        params = self._build_params(epoint, **kwargs)
+        r = self.session.get(self.base + epoint, params=params)
         
-        for attempt in range(max_retries + 1):
-            try:
-                params = self._build_params(epoint, **kwargs)
-                r = self.session.get(self.base + epoint, params=params)
-                
-                # Handle rate limiting
-                if r.status_code == 429:
-                    if attempt < max_retries:
-                        delay = base_delay * (2 ** attempt) + random.uniform(0, 1)
-                        logger.warning(f"{YELLOW}Rate limited. Retrying in {delay:.1f}s...")
-                        time.sleep(delay)
-                        continue
-                    else:
-                        raise requests.exceptions.HTTPError("Max retries exceeded due to rate limiting")
-                
-                # Handle authentication and validation errors
-                if epoint == "user/login":
-                    if r.status_code == 401:
-                        raise AuthenticationError("Invalid credentials.\n" + RESET)
-                    elif r.status_code == 400:
-                        raise InvalidAppIdError("Invalid app id.\n" + RESET)
-                    else:
-                        logger.info(f"{GREEN}Logged: OK")
-                elif r.status_code == 401 and epoint != "user/login":
-                    # Token expired/invalid - try to re-auth once
-                    logger.warning(f"{YELLOW}Token appears to be invalid/expired. Re-authenticating...")
-                    self._clear_token_cache()
-                    self.auth(self.email, self.pwd)
-                    # Retry the original request with new token
-                    params = self._build_params(epoint, **kwargs)
-                    r = self.session.get(self.base + epoint, params=params)
-                    r.raise_for_status()
-                elif (
-                    epoint in ["track/getFileUrl", "favorite/getUserFavorites"]
-                    and r.status_code == 400
-                ):
-                    raise InvalidAppSecretError(f"Invalid app secret: {r.json()}.\n" + RESET)
+        if epoint == "user/login":
+            if r.status_code == 401:
+                raise AuthenticationError("Invalid credentials.\n" + RESET)
+            elif r.status_code == 400:
+                raise InvalidAppIdError("Invalid app id.\n" + RESET)
+            else:
+                logger.info(f"{GREEN}Logged: OK")
+        elif (
+            epoint in ["track/getFileUrl", "favorite/getUserFavorites"]
+            and r.status_code == 400
+        ):
+            raise InvalidAppSecretError(f"Invalid app secret: {r.json()}.\n" + RESET)
 
-                r.raise_for_status()
-                
-                # Success - add normal delay before next call
-                if self.api_delay > 0 and epoint != "user/login":
-                    time.sleep(self.api_delay)
-                    
-                return r.json()
-                
-            except requests.exceptions.RequestException as e:
-                if attempt < max_retries and r.status_code != 401:  # Don't retry auth errors
-                    delay = base_delay * (2 ** attempt) + random.uniform(0, 0.5)
-                    logger.warning(f"{YELLOW}Request failed. Retrying in {delay:.1f}s...")
-                    time.sleep(delay)
-                else:
-                    raise
+        r.raise_for_status()
+        
+        # Add delay before next call
+        if self.api_delay > 0 and epoint != "user/login":
+            time.sleep(self.api_delay)
+            
+        return r.json()
 
     def _build_params(self, epoint, **kwargs):
         if epoint == "user/login":
