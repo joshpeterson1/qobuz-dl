@@ -1,5 +1,7 @@
 import logging
 import os
+import time
+import random
 from typing import Tuple
 
 import requests
@@ -305,26 +307,46 @@ class Download:
             return ("Unknown", quality_met, None, None)
 
 
-def tqdm_download(url, fname, desc):
-    r = requests.get(url, allow_redirects=True, stream=True)
-    total = int(r.headers.get("content-length", 0))
-    download_size = 0
-    with open(fname, "wb") as file, tqdm(
-        total=total,
-        unit="iB",
-        unit_scale=True,
-        unit_divisor=1024,
-        desc=desc,
-        bar_format=CYAN + "{n_fmt}/{total_fmt} /// {desc}",
-    ) as bar:
-        for data in r.iter_content(chunk_size=1024):
-            size = file.write(data)
-            bar.update(size)
-            download_size += size
+def tqdm_download(url, fname, desc, max_retries=3):
+    for attempt in range(max_retries + 1):
+        try:
+            r = requests.get(url, allow_redirects=True, stream=True, timeout=30)
+            r.raise_for_status()
+            total = int(r.headers.get("content-length", 0))
+            download_size = 0
+            
+            with open(fname, "wb") as file, tqdm(
+                total=total,
+                unit="iB",
+                unit_scale=True,
+                unit_divisor=1024,
+                desc=desc,
+                bar_format=CYAN + "{n_fmt}/{total_fmt} /// {desc}",
+            ) as bar:
+                for data in r.iter_content(chunk_size=1024):
+                    size = file.write(data)
+                    bar.update(size)
+                    download_size += size
 
-    if total != download_size:
-        # https://stackoverflow.com/questions/69919912/requests-iter-content-thinks-file-is-complete-but-its-not
-        raise ConnectionError("File download was interrupted for " + fname)
+            if total != download_size:
+                raise ConnectionError("File download was interrupted")
+            
+            return  # Success!
+            
+        except (requests.exceptions.RequestException, ConnectionError) as e:
+            if attempt < max_retries:
+                delay = 2 ** attempt + random.uniform(0, 1)
+                logger.warning(f"{YELLOW}Download failed, retrying in {delay:.1f}s... (attempt {attempt+1}/{max_retries})")
+                time.sleep(delay)
+                # Remove partial file if it exists
+                try:
+                    if os.path.exists(fname):
+                        os.remove(fname)
+                except:
+                    pass
+            else:
+                logger.error(f"{RED}Download failed after {max_retries} retries: {e}")
+                raise e
 
 
 def _get_description(item: dict, track_title, multiple=None):
