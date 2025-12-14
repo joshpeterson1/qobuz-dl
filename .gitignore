@@ -1,2 +1,5 @@
 Qobuz Downloads
 __pycache__
+.aider*
+/qobuz-test-env
+/qobuz_dl.egg-info
