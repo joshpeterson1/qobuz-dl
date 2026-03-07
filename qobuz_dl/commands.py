@@ -179,9 +179,7 @@ def qobuz_dl_args(
     interactive = fun_args(subparsers, default_limit)
     download = dl_args(subparsers)
     lucky = lucky_args(subparsers)
-    [
+    for i in (interactive, download, lucky):
         add_common_arg(i, default_folder, default_quality)
-        for i in (interactive, download, lucky)
-    ]
 
     return parser

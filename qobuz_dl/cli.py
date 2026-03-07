@@ -1,4 +1,5 @@
 import configparser
+import getpass
 import hashlib
 import logging
 import glob
@@ -30,7 +31,7 @@ def _reset_config(config_file):
     logging.info(f"{YELLOW}Creating config file: {config_file}")
     config = configparser.ConfigParser()
     config["DEFAULT"]["email"] = input("Enter your email:\n- ")
-    password = input("Enter your password\n- ")
+    password = getpass.getpass("Enter your password\n- ")
     config["DEFAULT"]["password"] = hashlib.md5(password.encode("utf-8")).hexdigest()
     config["DEFAULT"]["default_folder"] = (
         input("Folder for downloads (leave empty for default 'Qobuz Downloads')\n- ")
@@ -75,7 +76,7 @@ def _remove_leftovers(directory):
     for i in glob.glob(directory, recursive=True):
         try:
             os.remove(i)
-        except:  # noqa
+        except OSError:
             pass
 
 
@@ -155,7 +156,7 @@ def main():
         sys.exit(_reset_config(CONFIG_FILE))
 
     if arguments.show_config:
-        print(f"Configuation: {CONFIG_FILE}\nDatabase: {QOBUZ_DB}\n---")
+        print(f"Configuration: {CONFIG_FILE}\nDatabase: {QOBUZ_DB}\n---")
         with open(CONFIG_FILE, "r") as f:
             print(f.read())
         sys.exit()
@@ -173,7 +174,7 @@ def main():
         arguments.embed_art or embed_art,
         ignore_singles_eps=arguments.albums_only or albums_only,
         no_m3u_for_playlists=arguments.no_m3u or no_m3u,
-        quality_fallback=not arguments.no_fallback or not no_fallback,
+        quality_fallback=not (arguments.no_fallback or no_fallback),
         cover_og_quality=arguments.og_cover or og_cover,
         no_cover=arguments.no_cover or no_cover,
         downloads_db=None if no_database or arguments.no_db else QOBUZ_DB,

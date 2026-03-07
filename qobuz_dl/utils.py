@@ -64,7 +64,7 @@ def make_m3u(pl_directory):
                 index = "#EXTINF:{}, {} - {}\n{}".format(
                     length, artist, title, audio_rel_file
                 )
-            except:  # noqa
+            except Exception:
                 continue
             track_list.append(index)
 
@@ -94,8 +94,8 @@ def smart_discography_filter(
     def print_album(album: dict) -> None:
         logger.debug(
             f"{album['title']} - {album.get('version', '~~')} "
-            "({album['maximum_bit_depth']}/{album['maximum_sampling_rate']}"
-            " by {album['artist']['name']}) {album['id']}"
+            f"({album['maximum_bit_depth']}/{album['maximum_sampling_rate']}"
+            f" by {album['artist']['name']}) {album['id']}"
         )
 
     TYPE_REGEXES = {

@@ -7,7 +7,6 @@ import json
 import logging
 import os
 import time
-import random
 from datetime import datetime
 
 import requests
@@ -63,25 +62,7 @@ class Client:
         self.cfg_setup()
 
     def api_call(self, epoint, **kwargs):
-        params = self._build_params(epoint, **kwargs)
-        r = self.session.get(self.base + epoint, params=params)
-        
-        if epoint == "user/login":
-            if r.status_code == 401:
-                raise AuthenticationError("Invalid credentials.\n" + RESET)
-            elif r.status_code == 400:
-                raise InvalidAppIdError("Invalid app id.\n" + RESET)
-            else:
-                logger.info(f"{GREEN}Logged: OK")
-        elif (
-            epoint in ["track/getFileUrl", "favorite/getUserFavorites"]
-            and r.status_code == 400
-        ):
-            raise InvalidAppSecretError(f"Invalid app secret: {r.json()}.\n" + RESET)
-
-        r.raise_for_status()
-        
-        # Add delay before next call
+        # Apply rate limiting delay BEFORE the call to actually throttle
         if epoint != "user/login":
             if self.rate_limiter:
                 current_api_delay, _ = self.rate_limiter.get_delays()
@@ -89,7 +70,33 @@ class Client:
                     time.sleep(current_api_delay)
             elif self.api_delay > 0:
                 time.sleep(self.api_delay)
-            
+
+        params = self._build_params(epoint, **kwargs)
+        r = self.session.get(self.base + epoint, params=params, timeout=30)
+
+        if epoint == "user/login":
+            if r.status_code == 401:
+                raise AuthenticationError("Invalid credentials.\n" + RESET)
+            elif r.status_code == 400:
+                raise InvalidAppIdError("Invalid app id.\n" + RESET)
+        elif (
+            epoint in ["track/getFileUrl", "favorite/getUserFavorites"]
+            and r.status_code == 400
+        ):
+            self._clear_token_cache()
+            raise InvalidAppSecretError(f"Invalid app secret: {r.json()}.\n" + RESET)
+
+        if r.status_code == 401 and epoint != "user/login":
+            self._clear_token_cache()
+            raise AuthenticationError(
+                "Authentication token expired mid-session.\n" + RESET
+            )
+
+        r.raise_for_status()
+
+        if epoint == "user/login":
+            logger.info(f"{GREEN}Logged: OK")
+
         return r.json()
 
     def _build_params(self, epoint, **kwargs):
@@ -127,7 +134,6 @@ class Client:
             }
         elif epoint == "favorite/getUserFavorites":
             unix = time.time()
-            # r_sig = "userLibrarygetAlbumsList" + str(unix) + kwargs["sec"]
             r_sig = "favoritegetUserFavorites" + str(unix) + kwargs["sec"]
             r_sig_hashed = hashlib.md5(r_sig.encode("utf-8")).hexdigest()
             return {
@@ -269,6 +275,17 @@ class Client:
                 logger.info(f"{YELLOW}Cached token is for different user, ignoring")
                 return False
                 
+            # Check if token has expired (7-day TTL)
+            cached_at = cache_data.get('cached_at')
+            if cached_at:
+                try:
+                    cache_time = datetime.fromisoformat(cached_at)
+                    if (datetime.now() - cache_time).days > 7:
+                        logger.info(f"{YELLOW}Cached token expired (older than 7 days)")
+                        return False
+                except (ValueError, TypeError):
+                    pass
+
             cached_token = cache_data.get('user_auth_token')
             if not cached_token:
                 logger.info(f"{YELLOW}Invalid cached token data")
@@ -281,9 +298,9 @@ class Client:
             # Test the token with a simple API call
             try:
                 # Use a lightweight call to test token validity
-                test_response = self.session.get(f"{self.base}user/login", params={
+                test_response = self.session.get(f"{self.base}user/get", params={
                     "app_id": self.id
-                })
+                }, timeout=10)
                 if test_response.status_code == 401:
                     logger.info(f"{YELLOW}Cached token is expired/invalid")
                     return False
@@ -317,7 +334,11 @@ class Client:
             
             with open(self.token_cache_path, 'w') as f:
                 json.dump(cache_data, f, indent=2)
-                
+
+            # Restrict file permissions on Unix
+            if os.name != "nt":
+                os.chmod(self.token_cache_path, 0o600)
+
             logger.info(f"{GREEN}Authentication token cached")
             
         except Exception as e:

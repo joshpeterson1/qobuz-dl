@@ -21,7 +21,7 @@ def handle_download_id(db_path, item_id, add_id=False):
         return
 
     with sqlite3.connect(db_path) as conn:
-        # If add_if is False return a string to know if the ID is in the DB
+        # If add_id is False, check if the ID exists in the DB
         # Otherwise just add the ID to the DB
         if add_id:
             try:

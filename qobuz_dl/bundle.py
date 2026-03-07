@@ -17,10 +17,6 @@ _APP_ID_REGEX = re.compile(
     r'production:{api:{appId:"(?P<app_id>\d{9})",appSecret:"\w{32}"'
 )
 
-_BUNDLE_URL_REGEX = re.compile(
-    r'<script src="(/resources/\d+\.\d+\.\d+-[a-z]\d{3}/bundle\.js)"></script>'
-)
-
 _BASE_URL = "https://play.qobuz.com"
 _BUNDLE_URL_REGEX = re.compile(
     r'<script src="(/resources/\d+\.\d+\.\d+-[a-z]\d{3}/bundle\.js)"></script>'
@@ -32,17 +28,17 @@ class Bundle:
         self._session = Session()
 
         logger.debug("Getting logging page")
-        response = self._session.get(f"{_BASE_URL}/login")
+        response = self._session.get(f"{_BASE_URL}/login", timeout=15)
         response.raise_for_status()
 
         bundle_url_match = _BUNDLE_URL_REGEX.search(response.text)
         if not bundle_url_match:
-            raise NotImplementedError("Bundle URL found")
+            raise RuntimeError("Bundle URL not found")
 
         bundle_url = bundle_url_match.group(1)
 
         logger.debug("Getting bundle")
-        response = self._session.get(_BASE_URL + bundle_url)
+        response = self._session.get(_BASE_URL + bundle_url, timeout=15)
         response.raise_for_status()
 
         self._bundle = response.text
@@ -50,7 +46,7 @@ class Bundle:
     def get_app_id(self):
         match = _APP_ID_REGEX.search(self._bundle)
         if not match:
-            raise NotImplementedError("Failed to match APP ID")
+            raise RuntimeError("Failed to match APP ID")
 
         return match.group("app_id")
 

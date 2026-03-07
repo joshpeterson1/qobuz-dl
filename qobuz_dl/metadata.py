@@ -59,7 +59,9 @@ def _format_genres(genres: list) -> str:
     """
     genres = re.findall(r"([^\u2192\/]+)", "/".join(genres))
     no_repeats = []
-    [no_repeats.append(g) for g in genres if g not in no_repeats]
+    for g in genres:
+        if g not in no_repeats:
+            no_repeats.append(g)
     return ", ".join(no_repeats)
 
 
@@ -100,11 +102,22 @@ def _embed_id3_img(root_dir, audio: id3.ID3):
     )
     if os.path.isfile(emb_image):
         cover_image = emb_image
-    else:
+    elif os.path.isfile(multi_emb_image):
         cover_image = multi_emb_image
+    else:
+        logger.error("Cover image not found for embedding")
+        return
 
-    with open(cover_image, "rb") as cover:
-        audio.add(id3.APIC(3, "image/jpeg", 3, "", cover.read()))
+    try:
+        if os.path.getsize(cover_image) > FLAC_MAX_BLOCKSIZE:
+            raise Exception(
+                "downloaded cover size too large to embed. "
+                "turn off `og_cover` to avoid error"
+            )
+        with open(cover_image, "rb") as cover:
+            audio.add(id3.APIC(3, "image/jpeg", 3, "", cover.read()))
+    except Exception as e:
+        logger.error(f"Error embedding image: {e}", exc_info=True)
 
 
 # Use KeyError catching instead of dict.get to avoid empty tags
@@ -128,8 +141,11 @@ def tag_flac(
 
     audio["TRACKNUMBER"] = str(d["track_number"])  # TRACK NUMBER
 
-    if "Disc " in final_name:
-        audio["DISCNUMBER"] = str(d["media_number"])
+    isrc = d.get("isrc")
+    if isrc:
+        audio["ISRC"] = isrc
+
+    audio["DISCNUMBER"] = str(d["media_number"])
 
     try:
         audio["COMPOSER"] = d["composer"]["name"]  # COMPOSER
@@ -202,17 +218,21 @@ def tag_mp3(filename, root_dir, final_name, d, album, istrack=True, em_image=Fal
         tags["albumartist"] = d["album"]["artist"]["name"]
         tags["album"] = d["album"]["title"]
         tags["date"] = d["album"]["release_date_original"]
-        tags["copyright"] = _format_copyright(d["copyright"])
+        tags["copyright"] = _format_copyright(d.get("copyright") or "n/a")
         tracktotal = str(d["album"]["tracks_count"])
     else:
         tags["genre"] = _format_genres(album["genres_list"])
         tags["albumartist"] = album["artist"]["name"]
         tags["album"] = album["title"]
         tags["date"] = album["release_date_original"]
-        tags["copyright"] = _format_copyright(album["copyright"])
+        tags["copyright"] = _format_copyright(album.get("copyright") or "n/a")
         tracktotal = str(album["tracks_count"])
 
     tags["year"] = tags["date"][:4]
+
+    isrc = d.get("isrc")
+    if isrc:
+        tags["isrc"] = isrc
 
     audio["TRCK"] = id3.TRCK(encoding=3, text=f'{d["track_number"]}/{tracktotal}')
     audio["TPOS"] = id3.TPOS(encoding=3, text=str(d["media_number"]))

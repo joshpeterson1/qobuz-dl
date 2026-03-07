@@ -1,7 +1,6 @@
 import logging
 import os
 import time
-import random
 from typing import Tuple
 from urllib3.exceptions import IncompleteRead
 
@@ -46,29 +45,36 @@ class RateLimiter:
     def escalate(self):
         """Double the rate limits due to failures."""
         self.escalation_count += 1
+        self.successful_downloads = 0  # Reset success counter on failure
         self.current_api_delay *= 2
         self.current_download_delay *= 2
-        
+
         # Cap at reasonable maximums
         self.current_api_delay = min(self.current_api_delay, 30.0)
         self.current_download_delay = min(self.current_download_delay, 10.0)
-        
+
         logger.warning(
-            f"{YELLOW}Rate limits escalated (x{2**self.escalation_count}): "
+            f"{YELLOW}Rate limits escalated (level {self.escalation_count}): "
             f"API={self.current_api_delay:.1f}s, Download={self.current_download_delay:.1f}s"
         )
-    
+
     def record_success(self):
-        """Record a successful download."""
+        """Record a successful download and step down rate limits gradually."""
         self.successful_downloads += 1
-        
-        # Reset rate limits after 10 successful downloads
+
         if self.successful_downloads >= 10 and self.escalation_count > 0:
-            self.current_api_delay = self.initial_api_delay
-            self.current_download_delay = self.initial_download_delay
-            self.escalation_count = 0
+            # Step down one level instead of full reset
+            self.current_api_delay = max(self.current_api_delay / 2, self.initial_api_delay)
+            self.current_download_delay = max(self.current_download_delay / 2, self.initial_download_delay)
+            self.escalation_count = max(self.escalation_count - 1, 0)
             self.successful_downloads = 0
-            logger.info(f"{GREEN}Rate limits reset to normal after successful downloads")
+            if self.escalation_count > 0:
+                logger.info(
+                    f"{GREEN}Rate limits reduced (level {self.escalation_count}): "
+                    f"API={self.current_api_delay:.1f}s, Download={self.current_download_delay:.1f}s"
+                )
+            else:
+                logger.info(f"{GREEN}Rate limits reset to normal after successful downloads")
     
     def get_delays(self):
         """Get current delay values."""
@@ -131,12 +137,13 @@ class Download:
 
     def download_id_by_type(self, track=True):
         if not track:
-            self.download_release()
+            return self.download_release()
         else:
-            self.download_track()
+            return self.download_track()
 
     def download_release(self):
         count = 0
+        failed = 0
         meta = self.client.get_album_meta(self.item_id)
 
         if not meta.get("streamable"):
@@ -147,7 +154,7 @@ class Download:
             or meta.get("artist").get("name") == "Various Artists"
         ):
             logger.info(f'{OFF}Ignoring Single/EP/VA: {meta.get("title", "n/a")}')
-            return
+            return True
 
         album_title = _get_title(meta)
 
@@ -158,7 +165,7 @@ class Download:
             logger.info(
                 f"{OFF}Skipping {album_title} as it doesn't meet quality requirement"
             )
-            return
+            return True
 
         logger.info(
             f"\n{YELLOW}Downloading: {album_title}\nQuality: {file_format}"
@@ -177,20 +184,23 @@ class Download:
         if self.no_cover:
             logger.info(f"{OFF}Skipping cover")
         else:
-            _get_extra(meta["image"]["large"], dirn, og_quality=self.cover_og_quality)
+            try:
+                _get_extra(meta["image"]["large"], dirn, og_quality=self.cover_og_quality)
+            except Exception as e:
+                logger.error(f"{RED}Failed to download cover: {e}")
 
         if "goodies" in meta:
             try:
                 _get_extra(meta["goodies"][0]["url"], dirn, "booklet.pdf")
-            except:  # noqa
+            except Exception:
                 pass
         media_numbers = [track["media_number"] for track in meta["tracks"]["items"]]
-        is_multiple = True if len([*{*media_numbers}]) > 1 else False
+        is_multiple = len(set(media_numbers)) > 1
         for i in meta["tracks"]["items"]:
             parse = self.client.get_track_url(i["id"], fmt_id=self.quality)
             if "sample" not in parse and parse["sampling_rate"]:
-                is_mp3 = True if int(self.quality) == 5 else False
-                self._download_and_tag(
+                is_mp3 = int(self.quality) == 5
+                success = self._download_and_tag(
                     dirn,
                     count,
                     parse,
@@ -200,10 +210,22 @@ class Download:
                     is_mp3,
                     i["media_number"] if is_multiple else None,
                 )
+                if not success:
+                    failed += 1
             else:
                 logger.info(f"{OFF}Demo. Skipping")
             count = count + 1
-        logger.info(f"{GREEN}Completed")
+
+        total = len(meta["tracks"]["items"])
+        downloaded = total - failed
+        if failed:
+            logger.info(
+                f"{YELLOW}Completed with errors: {downloaded}/{total} tracks"
+                f" downloaded, {failed} failed"
+            )
+        else:
+            logger.info(f"{GREEN}Completed: {downloaded}/{total} tracks downloaded")
+        return failed == 0
 
     def download_track(self):
         parse = self.client.get_track_url(self.item_id, self.quality)
@@ -225,7 +247,7 @@ class Download:
                     f"{OFF}Skipping {track_title} as it doesn't "
                     "meet quality requirement"
                 )
-                return
+                return True
             track_attr = self._get_track_attr(
                 meta, track_title, bit_depth, sampling_rate
             )
@@ -236,13 +258,16 @@ class Download:
             if self.no_cover:
                 logger.info(f"{OFF}Skipping cover")
             else:
-                _get_extra(
-                    meta["album"]["image"]["large"],
-                    dirn,
-                    og_quality=self.cover_og_quality,
-                )
-            is_mp3 = True if int(self.quality) == 5 else False
-            self._download_and_tag(
+                try:
+                    _get_extra(
+                        meta["album"]["image"]["large"],
+                        dirn,
+                        og_quality=self.cover_og_quality,
+                    )
+                except Exception as e:
+                    logger.error(f"{RED}Failed to download cover: {e}")
+            is_mp3 = int(self.quality) == 5
+            success = self._download_and_tag(
                 dirn,
                 1,
                 parse,
@@ -252,9 +277,11 @@ class Download:
                 is_mp3,
                 False,
             )
+            logger.info(f"{GREEN}Completed")
+            return success
         else:
             logger.info(f"{OFF}Demo. Skipping")
-        logger.info(f"{GREEN}Completed")
+            return True
 
     def _download_and_tag(
         self,
@@ -273,7 +300,10 @@ class Download:
             url = track_url_dict["url"]
         except KeyError:
             logger.info(f"{OFF}Track not available for download")
-            return
+            _log_failed_track(
+                track_metadata.get("title", "unknown"), "Track URL not available"
+            )
+            return False
 
         if multiple:
             root_dir = os.path.join(root_dir, f"Disc {multiple}")
@@ -289,19 +319,27 @@ class Download:
         # track_format is a format string
         # e.g. '{tracknumber}. {artist} - {tracktitle}'
         formatted_path = sanitize_filename(self.track_format.format(**filename_attr))
-        final_file = os.path.join(root_dir, formatted_path)[:250] + extension
+        # Truncate filename (not full path) to stay within OS path limits
+        max_filename_len = 250 - len(root_dir) - len(extension) - 1
+        if max_filename_len < 10:
+            max_filename_len = 10
+        if len(formatted_path) > max_filename_len:
+            logger.warning(f"{YELLOW}Filename truncated: {formatted_path}")
+            formatted_path = formatted_path[:max_filename_len].rstrip(". ")
+        full_path = os.path.join(root_dir, formatted_path)
+        final_file = full_path + extension
 
         if os.path.isfile(final_file):
             logger.info(f"{OFF}{track_title} was already downloaded")
-            return
+            return True
 
         try:
             tqdm_download(url, filename, track_title, rate_limiter=self.rate_limiter)
-            
+
             # Record successful download
             if self.rate_limiter:
                 self.rate_limiter.record_success()
-                
+
             tag_function = metadata.tag_mp3 if is_mp3 else metadata.tag_flac
             try:
                 tag_function(
@@ -315,10 +353,19 @@ class Download:
                 )
             except Exception as e:
                 logger.error(f"{RED}Error tagging the file: {e}", exc_info=True)
-                
+                # Save untagged file rather than losing the download
+                try:
+                    if os.path.isfile(filename):
+                        os.rename(filename, final_file)
+                        logger.warning(f"{YELLOW}Saved untagged file: {final_file}")
+                except OSError:
+                    pass
+            return True
+
         except Exception as e:
             logger.error(f"{RED}Failed to download {track_title}: {e}")
-            # Don't re-raise - continue with next track
+            _log_failed_track(track_title, str(e))
+            return False
 
     @staticmethod
     def _get_filename_attr(artist, track_metadata, track_title):
@@ -390,6 +437,11 @@ class Download:
 
 def tqdm_download(url, fname, desc, max_retries=3, rate_limiter=None):
     """Download a file with retry logic for connection issues."""
+    if rate_limiter:
+        _, download_delay = rate_limiter.get_delays()
+        if download_delay > 0:
+            time.sleep(download_delay)
+
     for attempt in range(max_retries):
         try:
             r = requests.get(url, allow_redirects=True, stream=True, timeout=30)
@@ -410,7 +462,7 @@ def tqdm_download(url, fname, desc, max_retries=3, rate_limiter=None):
                     bar.update(size)
                     download_size += size
 
-            if total != download_size:
+            if total > 0 and total != download_size:
                 raise ConnectionError(f"File download was interrupted for {fname}")
             
             return  # Success!
@@ -425,7 +477,7 @@ def tqdm_download(url, fname, desc, max_retries=3, rate_limiter=None):
                 try:
                     if os.path.exists(fname):
                         os.remove(fname)
-                except:
+                except OSError:
                     pass
             else:
                 # Final failure - log it and escalate rate limits
@@ -437,13 +489,6 @@ def tqdm_download(url, fname, desc, max_retries=3, rate_limiter=None):
                 
                 raise e
 
-
-def _get_description(item: dict, track_title, multiple=None):
-    downloading_title = f"{track_title} "
-    f'[{item["bit_depth"]}/{item["sampling_rate"]}]'
-    if multiple:
-        downloading_title = f"[Disc {multiple}] {downloading_title}"
-    return downloading_title
 
 
 def _get_title(item_dict):
