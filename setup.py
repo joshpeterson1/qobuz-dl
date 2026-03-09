@@ -16,6 +16,7 @@ requirements = [
     "pick==1.6.0",
     "beautifulsoup4",
     "colorama",
+    "spotipy",
 ]
 
 setup(
@@ -28,10 +29,14 @@ setup(
     long_description_content_type="text/markdown",
     url="https://github.com/vitiko98/Qobuz-DL",
     install_requires=requirements,
+    extras_require={
+        "bot": ["python-telegram-bot>=20.0", "torf", "qbittorrent-api"],
+    },
     entry_points={
         "console_scripts": [
             "qobuz-dl = qobuz_dl:main",
             "qdl = qobuz_dl:main",
+            "qobuz-dl-bot = qobuz_dl.bot:run_bot",
         ],
     },
     packages=find_packages(),
