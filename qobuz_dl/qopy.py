@@ -83,7 +83,6 @@ class Client:
             epoint in ["track/getFileUrl", "favorite/getUserFavorites"]
             and r.status_code == 400
         ):
-            self._clear_token_cache()
             raise InvalidAppSecretError(f"Invalid app secret: {r.json()}.\n" + RESET)
 
         if r.status_code == 401 and epoint != "user/login":
