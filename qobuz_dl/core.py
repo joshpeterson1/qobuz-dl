@@ -1,5 +1,6 @@
 import logging
 import os
+import re
 import sys
 
 import requests
@@ -14,7 +15,7 @@ from qobuz_dl.exceptions import NonStreamable
 from qobuz_dl.db import create_db, handle_download_id
 from qobuz_dl.utils import (
     get_url_info,
-    make_m3u,
+    make_m3u8,
     smart_discography_filter,
     format_duration,
     create_and_return_dir,
@@ -55,8 +56,12 @@ class QobuzDL:
         smart_discography=False,
         api_delay=1.0,
         download_delay=0.3,
+        spotify_client_id="",
+        spotify_client_secret="",
     ):
         self.directory = create_and_return_dir(directory)
+        self.spotify_client_id = spotify_client_id
+        self.spotify_client_secret = spotify_client_secret
         self.quality = quality
         self.embed_art = embed_art
         self.lucky_limit = lucky_limit
@@ -93,7 +98,7 @@ class QobuzDL:
                 "according to the local database.\nUse the '--no-db' flag "
                 "to bypass this."
             )
-            return
+            return None
         try:
             dloader = downloader.Download(
                 self.client,
@@ -109,7 +114,7 @@ class QobuzDL:
                 self.track_format,
                 self.rate_limiter,
             )
-            all_succeeded = dloader.download_id_by_type(not album)
+            all_succeeded, path = dloader.download_id_by_type(not album)
             if all_succeeded:
                 handle_download_id(self.downloads_db, item_id, add_id=True)
             else:
@@ -117,8 +122,10 @@ class QobuzDL:
                     f"{YELLOW}Not marking {item_id} as complete due to"
                     " failed tracks. Will retry on next run."
                 )
+            return path
         except (requests.exceptions.RequestException, NonStreamable) as e:
             logger.error(f"{RED}Error getting release: {e}. Skipping...")
+            return None
 
     def handle_url(self, url):
         possibles = {
@@ -144,7 +151,7 @@ class QobuzDL:
             logger.info(
                 f'{RED}Invalid url: "{url}". Use urls from ' "https://play.qobuz.com!"
             )
-            return
+            return None
         if type_dict["func"]:
             content = [item for item in type_dict["func"](item_id)]
             content_name = content[0]["name"]
@@ -176,9 +183,10 @@ class QobuzDL:
                     new_path,
                 )
             if url_type == "playlist" and not self.no_m3u_for_playlists:
-                make_m3u(new_path)
+                make_m3u8(new_path, content_name)
+            return new_path
         else:
-            self.download_from_id(item_id, type_dict["album"])
+            return self.download_from_id(item_id, type_dict["album"])
 
     def download_list_of_urls(self, urls):
         if not urls or not isinstance(urls, list):
@@ -187,6 +195,8 @@ class QobuzDL:
         for url in urls:
             if "last.fm" in url:
                 self.download_lastfm_pl(url)
+            elif "spotify.com" in url:
+                self.download_spotify_pl(url)
             elif os.path.isfile(url):
                 self.download_from_txt_file(url)
             else:
@@ -372,7 +382,102 @@ class QobuzDL:
                 return final_url_list
         except KeyboardInterrupt:
             logger.info(f"{YELLOW}Bye")
-            return
+            return None
+
+    def download_spotify_pl(self, url):
+        if not self.spotify_client_id or not self.spotify_client_secret:
+            logger.error(
+                f"{RED}Spotify credentials not configured. "
+                "Add spotify_client_id and spotify_client_secret to your config file. "
+                "Get them free at https://developer.spotify.com/dashboard"
+            )
+            return None
+
+        try:
+            import spotipy
+            from spotipy.oauth2 import SpotifyClientCredentials, SpotifyOAuth
+        except ImportError:
+            logger.error(f"{RED}spotipy is not installed. Run: pip install spotipy")
+            return None
+
+        match = re.search(r"spotify\.com/playlist/([a-zA-Z0-9]+)", url)
+        if not match:
+            logger.error(f"{RED}Invalid Spotify playlist URL: {url}")
+            return None
+
+        playlist_id = match.group(1)
+
+        try:
+            sp = spotipy.Spotify(auth_manager=SpotifyClientCredentials(
+                client_id=self.spotify_client_id,
+                client_secret=self.spotify_client_secret,
+            ))
+            playlist = sp.playlist(playlist_id)
+        except Exception:
+            # Private/personalized playlist — fall back to user OAuth
+            logger.info(
+                f"{YELLOW}Playlist not accessible via public API, "
+                "trying user authentication..."
+            )
+            try:
+                cache_dir = os.path.join(
+                    os.environ.get("APPDATA") if os.name == "nt"
+                    else os.path.join(os.environ["HOME"], ".config"),
+                    "qobuz-dl",
+                )
+                sp = spotipy.Spotify(auth_manager=SpotifyOAuth(
+                    client_id=self.spotify_client_id,
+                    client_secret=self.spotify_client_secret,
+                    redirect_uri="http://127.0.0.1:8888/callback",
+                    scope="playlist-read-private",
+                    cache_path=os.path.join(cache_dir, ".spotify_oauth_cache"),
+                ))
+                playlist = sp.playlist(playlist_id)
+            except Exception as e:
+                logger.error(f"{RED}Failed to fetch Spotify playlist: {e}")
+                return None
+
+        pl_title = sanitize_filename(playlist["name"])
+        pl_directory = os.path.join(self.directory, pl_title)
+
+        # Collect all tracks with pagination
+        tracks = []
+        results = playlist["tracks"]
+        while True:
+            for item in results["items"]:
+                track = item.get("track")
+                if not track:
+                    continue
+                artist = track["artists"][0]["name"] if track["artists"] else ""
+                title = track["name"]
+                if artist and title:
+                    tracks.append(f"{artist} {title}")
+            if results["next"]:
+                results = sp.next(results)
+            else:
+                break
+
+        if not tracks:
+            logger.info(f"{OFF}No tracks found in Spotify playlist")
+            return None
+
+        logger.info(
+            f"{YELLOW}Downloading Spotify playlist: {pl_title} "
+            f"({len(tracks)} tracks)"
+        )
+
+        for query in tracks:
+            search_results = self.search_by_type(query, "track", 1, lucky=True)
+            if not search_results:
+                logger.info(f"{OFF}No Qobuz results for: {query}")
+                continue
+            track_id = get_url_info(search_results[0])[1]
+            if track_id:
+                self.download_from_id(track_id, False, pl_directory)
+
+        if not self.no_m3u_for_playlists:
+            make_m3u8(pl_directory, pl_title)
+        return pl_directory
 
     def download_lastfm_pl(self, playlist_url):
         # Apparently, last fm API doesn't have a playlist endpoint. If you
@@ -381,7 +486,7 @@ class QobuzDL:
             r = requests.get(playlist_url, timeout=10)
         except requests.exceptions.RequestException as e:
             logger.error(f"{RED}Playlist download failed: {e}")
-            return
+            return None
         soup = bso(r.content, "html.parser")
         artists = [artist.text for artist in soup.select(ARTISTS_SELECTOR)]
         titles = [title.text for title in soup.select(TITLE_SELECTOR)]
@@ -394,7 +499,7 @@ class QobuzDL:
 
         if not track_list:
             logger.info(f"{OFF}Nothing found")
-            return
+            return None
 
         pl_title = sanitize_filename(soup.select_one("h1").text)
         pl_directory = os.path.join(self.directory, pl_title)
@@ -412,4 +517,5 @@ class QobuzDL:
                 self.download_from_id(track_id, False, pl_directory)
 
         if not self.no_m3u_for_playlists:
-            make_m3u(pl_directory)
+            make_m3u8(pl_directory, pl_title)
+        return pl_directory

@@ -62,6 +62,8 @@ def _reset_config(config_file):
     config["DEFAULT"]["smart_discography"] = "false"
     config["DEFAULT"]["api_delay"] = "1.0"
     config["DEFAULT"]["download_delay"] = "0.3"
+    config["DEFAULT"]["spotify_client_id"] = ""
+    config["DEFAULT"]["spotify_client_secret"] = ""
     with open(config_file, "w") as configfile:
         config.write(configfile)
     logging.info(
@@ -137,6 +139,8 @@ def main():
         track_format = config["DEFAULT"]["track_format"]
         api_delay = config.getfloat("DEFAULT", "api_delay")
         download_delay = config.getfloat("DEFAULT", "download_delay")
+        spotify_client_id = config["DEFAULT"].get("spotify_client_id", "")
+        spotify_client_secret = config["DEFAULT"].get("spotify_client_secret", "")
 
         secrets = [
             secret for secret in config["DEFAULT"]["secrets"].split(",") if secret
@@ -183,6 +187,8 @@ def main():
         smart_discography=arguments.smart_discography or smart_discography,
         api_delay=getattr(arguments, 'api_delay', None) or api_delay,
         download_delay=getattr(arguments, 'download_delay', None) or download_delay,
+        spotify_client_id=spotify_client_id,
+        spotify_client_secret=spotify_client_secret,
     )
     qobuz.initialize_client(email, password, app_id, secrets)
 
