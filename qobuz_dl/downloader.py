@@ -154,7 +154,7 @@ class Download:
             or meta.get("artist").get("name") == "Various Artists"
         ):
             logger.info(f'{OFF}Ignoring Single/EP/VA: {meta.get("title", "n/a")}')
-            return True
+            return True, None
 
         album_title = _get_title(meta)
 
@@ -165,7 +165,7 @@ class Download:
             logger.info(
                 f"{OFF}Skipping {album_title} as it doesn't meet quality requirement"
             )
-            return True
+            return True, None
 
         logger.info(
             f"\n{YELLOW}Downloading: {album_title}\nQuality: {file_format}"
@@ -225,7 +225,7 @@ class Download:
             )
         else:
             logger.info(f"{GREEN}Completed: {downloaded}/{total} tracks downloaded")
-        return failed == 0
+        return failed == 0, dirn
 
     def download_track(self):
         parse = self.client.get_track_url(self.item_id, self.quality)
@@ -247,7 +247,7 @@ class Download:
                     f"{OFF}Skipping {track_title} as it doesn't "
                     "meet quality requirement"
                 )
-                return True
+                return True, None
             track_attr = self._get_track_attr(
                 meta, track_title, bit_depth, sampling_rate
             )
@@ -278,10 +278,10 @@ class Download:
                 False,
             )
             logger.info(f"{GREEN}Completed")
-            return success
+            return success, dirn
         else:
             logger.info(f"{OFF}Demo. Skipping")
-            return True
+            return True, None
 
     def _download_and_tag(
         self,

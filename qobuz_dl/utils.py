@@ -4,8 +4,6 @@ import os
 import logging
 import time
 
-from mutagen.mp3 import EasyMP3
-from mutagen.flac import FLAC
 
 logger = logging.getLogger(__name__)
 
@@ -34,43 +32,21 @@ class PartialFormatter(string.Formatter):
             raise
 
 
-def make_m3u(pl_directory):
-    track_list = ["#EXTM3U"]
+def make_m3u8(pl_directory, pl_name=None):
     rel_folder = os.path.basename(os.path.normpath(pl_directory))
-    pl_name = rel_folder + ".m3u"
+    m3u8_file = rel_folder + ".m3u8"
+    lines = ["#EXTM3U"]
+    if pl_name:
+        lines.append(f"#PLAYLIST:{pl_name}")
     for local, dirs, files in os.walk(pl_directory):
         dirs.sort()
-        audio_rel_files = [
-            os.path.join(os.path.basename(os.path.normpath(local)), file_)
-            for file_ in files
-            if os.path.splitext(file_)[-1] in EXTENSIONS
-        ]
-        audio_files = [
-            os.path.abspath(os.path.join(local, file_))
-            for file_ in files
-            if os.path.splitext(file_)[-1] in EXTENSIONS
-        ]
-        if not audio_files or len(audio_files) != len(audio_rel_files):
-            continue
-
-        for audio_rel_file, audio_file in zip(audio_rel_files, audio_files):
-            try:
-                pl_item = (
-                    EasyMP3(audio_file) if ".mp3" in audio_file else FLAC(audio_file)
-                )
-                title = pl_item["TITLE"][0]
-                artist = pl_item["ARTIST"][0]
-                length = int(pl_item.info.length)
-                index = "#EXTINF:{}, {} - {}\n{}".format(
-                    length, artist, title, audio_rel_file
-                )
-            except Exception:
-                continue
-            track_list.append(index)
-
-    if len(track_list) > 1:
-        with open(os.path.join(pl_directory, pl_name), "w") as pl:
-            pl.write("\n\n".join(track_list))
+        for file_ in sorted(files):
+            if os.path.splitext(file_)[-1] in EXTENSIONS:
+                rel_path = os.path.join(os.path.basename(os.path.normpath(local)), file_)
+                lines.append(rel_path)
+    if len(lines) > (2 if pl_name else 1):
+        with open(os.path.join(pl_directory, m3u8_file), "w", encoding="utf-8") as f:
+            f.write("\n".join(lines) + "\n")
 
 
 def smart_discography_filter(
